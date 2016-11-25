@@ -1,0 +1,204 @@
+#load necessary tables
+```{r}
+library(XML)
+library(rvest)
+library(parallel)
+library(plyr)
+library(ggplot2)
+```
+
+### Taking a random sample of size of 50 pages of data from each UC.  Each page has 50 cases (except the last).
+
+```{r}
+campuses <- c("BERKELEY", "LOS+ANGELES", "SAN+DIEGO", "DAVIS", "IRVINE", "MERCED", "RIVERSIDE", "SAN+FRANCISCO", "UCOP", "SANTA+CRUZ", "SANTA+BARBARA")
+
+names(campuses) <- campuses
+
+campusURL <- function(campus){
+  url1 <- "http://ucpay.globl.org/index.php?campus="
+  url2 <- "&name=&title=&base=&overtime=&extra=&gross=%3E30000&year=&s=gross"
+  paste(url1,campus,url2,sep="")
+}
+
+setSample <-function(campus,seed=1234){
+  set.seed(seed)
+  pages <- campusURL(campus) %>% htmlParse() %>% getNodeSet('//p[@class="pagelinks"]/a') %>% sapply(xmlValue)
+  sample(as.numeric(pages[10]), floor(as.numeric(pages[10]) * 0.02))
+}
+
+samples<-lapply(campuses,setSample)
+```
+
+## Generates a List of Data Tables
+```{r}
+# Function that scrapes pages from UCPay
+#http://ucpay.globl.org/index.php?campus=&name=&title=&base=&overtime=&extra=&gross=>30000&year=&s=gross
+gettable <- function(pagenum,campus){
+  tables<-read_html(paste(campusURL(campus),"&p=",pagenum, sep="")) %>% html_nodes(xpath="//table") %>% html_table(fill=TRUE)
+  tables[[4]]
+}  
+
+UCtable <- function(campus,samples){
+  # A random Sample
+  randomPages <- samples[[campus]]
+  lapply(randomPages,gettable,campus) %>% rbind.fill()
+}
+
+```
+
+## Compute The List of Wage Data Frames from each UC campus in parallel
+```{r}
+UCtableList <- campuses %>%
+  mclapply(UCtable,samples, mc.preschedule = FALSE)
+```
+
+##turn the UCtableList into a dataframe
+```{r}
+UCdataFrame<-rbind.fill(UCtableList) %>%
+  mutate(`Base Pay`=as.numeric(gsub("[$,]","",`Base Pay`)),
+     	`Overtime Pay`=as.numeric(gsub("[$,]","",`Overtime Pay`)),
+     	`Extra Pay`=as.numeric(gsub("[$,]","",`Extra Pay`)),
+     	`Gross Pay`=as.numeric(gsub("[$,]","",`Gross Pay`)))
+```
+
+###clean the table names by getting rid of commas and middle names
+```{r}
+UCdataFrame$Name <- UCdataFrame$Name %>% gsub(",","", .) %>% gsub("^([^ ]+) +([^ ]+).*", "\\2 \\1", .)
+```
+
+# Line Plots
+```{r}
+totalsalaries <- UCdataFrame %>%
+      group_by(Year) %>%
+      summarize(mean = mean(`Gross Pay`), mid = median(`Gross Pay`))
+
+totalsalariesYearly <- UCdataFrame %>%
+      group_by(Campus, Year) %>%
+      summarize(mean = mean(`Gross Pay`), mid = median(`Gross Pay`))
+
+#create a new theme
+abluetheme <- theme(plot.background = element_rect(fill = "lightblue", colour = "black", size = 2, linetype = "solid"), legend.background=element_rect(colour = "black", size = 1, linetype = "solid"), panel.background=element_rect(colour = "black", size = 2, linetype = "solid"), plot.title=element_text(size=15))
+
+#create average gross salary of UC campuses from 2004-2014
+avglplot <- UCdataFrame %>%
+  group_by(Year) %>%
+  summarize(mean = mean(`Gross Pay`), mid = median(`Gross Pay`), SE = sd(`Gross Pay`)) %>%
+  ggplot(aes(x=Year, y=mean)) + geom_line() + geom_point(size=2) + 
+  geom_smooth(linetype=0, fill="light blue")+ geom_point(data=totalsalariesYearly, aes(x=Year, y=mean, col=Campus)) + 
+  stat_summary() + 
+  geom_line(data=totalsalariesYearly, aes(col=Campus, group=Campus)) + 
+  labs(title="Average Gross Salary of UC Campuses, 2004-2014") + ylab("Mean Gross Pay") + scale_x_continuous(breaks=c(2004, 2006, 2008, 2010, 2012, 2014), labels=c(2004, 2006, 2008, 2010, 2012, 2014)) + 
+  scale_y_continuous(labels = scales::dollar) +  
+  abluetheme
+
+#create average gross salary of UC campuses from 2004-2014 with standard errors
+avglplot <- UCdataFrame %>%
+  ggplot(aes(x=Year, y=`Gross Pay`))  +
+  stat_summary(aes(group=Campus, col=Campus)) + 
+  stat_summary(geom="line", aes(group=Campus, col=Campus)) + 
+  stat_summary() + 
+  stat_summary(geom="line") + 
+  labs(title="Average Gross Salary of UC Campuses, 2004-2014") + ylab("Mean Gross Pay") + scale_x_continuous(breaks=c(2004, 2006, 2008, 2010, 2012, 2014), labels=c(2004, 2006, 2008, 2010, 2012, 2014)) + 
+  scale_y_continuous(labels = scales::dollar) +  
+  abluetheme
+
+#create mean salary plot
+avglplotYearly <- totalsalariesYearly %>% ggplot(aes(x=Year, y=mean)) + geom_line(aes(col=Campus, group=Campus)) + geom_point()  + labs(title="Mean Salary") + ylab("Mean") + abluetheme
+
+#create median plot
+midplot <- UCdataFrame %>%
+  group_by(Year) %>%
+  summarize(mean = mean(`Gross Pay`), mid = median(`Gross Pay`), SE = sd(`Gross Pay`)) %>%
+  ggplot(aes(x=Year, y=mid)) + geom_line() + geom_point(size=2) + 
+  geom_smooth(linetype=0, fill="light blue")+ geom_point(data=totalsalariesYearly, aes(x=Year, y=mid, col=Campus)) + 
+  stat_summary() + 
+  geom_line(data=totalsalariesYearly, aes(col=Campus, group=Campus)) + 
+  labs(title="Median Salary of UC Campuses, 2004-2014") + ylab("Median Gross Pay") + scale_x_continuous(breaks=c(2004, 2006, 2008, 2010, 2012, 2014), labels=c(2004, 2006, 2008, 2010, 2012, 2014)) + 
+  scale_y_continuous(labels = scales::dollar) +  
+  abluetheme
+
+```
+
+# Stacked plot plot
+```{r}
+wideUCdataFrame <- UCdataFrame %>%
+  gather(`Pay Type`, Amount, `Base Pay`, `Overtime Pay`, `Extra Pay`) %>%
+  group_by(Campus, Year, `Pay Type`) %>%
+  summarise(Amount = sum(Amount))
+
+df <- wideUCdataFrame %>%
+  ungroup() %>%
+  unite(CampusPay, Campus, `Pay Type`, sep=" ")
+
+stackedWide <- wideUCdataFrame  %>%
+  filter(Campus=="BERKELEY") %>%
+  ggplot(aes(x=Year, y=Amount, fill=`Pay Type`)) + geom_area(position = "stack") + 
+  abluetheme + scale_y_continuous(labels = scales::dollar)
+
+stackedPlotCampus <- df %>%
+  ggplot(aes(x=Year, y=Amount, fill=CampusPay)) + geom_area(position = "stack") + abluetheme + scale_y_continuous(labels = scales::dollar)
+```
+#Profession wages between different universities 
+```{r}
+patternprof <- "PROF(?!ESSIONAL)|LECT"
+patternpostgrad <- "POST"
+patternhealth <- "(NURSE|CUSTODIAN|MECHANIC)"
+
+searchPattern <- function(str){
+      if (grepl(patternprof, str, perl=TRUE)) {
+        return("Professor")
+      } else if (grepl(patternpostgrad, str, perl=TRUE)) {
+        return("Post Grad")
+      } else if (grepl(patternhealth, str, perl=TRUE)) {
+        return("Health")
+      } else {
+        return("Other")
+      }
+}
+
+searchPatternVect <- function(vec) {
+  return(sapply(X=vec, FUN=searchPattern))
+}
+
+UCLA_BerkDF <- UCdataFrame %>%
+  filter(Campus=="LOS ANGELES" | Campus == "BERKELEY") %>%
+  mutate(Title=searchPatternVect(Title))
+
+BerkvsLA <- UCLA_BerkDF %>%
+  group_by(Campus, Year, Title) %>%
+  summarise(Average=mean(`Gross Pay`)) %>%
+  ggplot(aes(x=Year, y=Average)) +
+  geom_line(aes(col=Title)) +
+  geom_point(aes(col=Title)) + 
+  facet_wrap(~ Campus) + abluetheme +
+  labs(title="Average Pay of Selected Profession: UC Berkeley vs. UCLA") + ylab("Mean Pay")
+
+profAvglplot <- UCdataFrame %>% 
+  mutate(Title=searchPatternVect(Title)) %>%
+  group_by(Campus, Year, Title) %>%
+  summarise(Average=mean(`Gross Pay`)) %>%
+  ggplot(aes(x=Year, y=Average)) +
+  geom_line(aes(col=Title)) +
+  geom_point(aes(col=Title)) + 
+  facet_wrap(~ Campus) + abluetheme +
+  labs(title="Average Pay of Selected Profession, Faceted by Campus") + ylab("Mean Pay")
+
+bigNames <- c("BERKELEY", "DAVIS", "IRVINE", "SAN DIEGO", "SAN FRANCISCO", "LOS ANGELES")
+
+professionCountPlot1 <- UCdataFrame %>% 
+  filter(Campus %in% bigNames) %>%
+  mutate(Title=searchPatternVect(Title)) %>%
+  ggplot(aes(x=factor(Year))) + geom_bar(aes(fill=Title)) + scale_x_discrete(breaks=c(2004, 2006, 2008, 2010, 2012, 2014), labels=c(2004, 2006, 2008, 2010, 2012, 2014)) + facet_wrap(~ Campus) + abluetheme + labs(title="Counts of each Profession Faceted by Campus") + ylab("Count") + xlab("Year")
+
+professionCountPlot2 <- UCdataFrame %>% 
+  filter(!(Campus %in% bigNames)) %>%
+  mutate(Title=searchPatternVect(Title)) %>%
+  ggplot(aes(x=factor(Year))) + geom_bar(aes(fill=Title)) + scale_x_discrete(breaks=c(2004, 2006, 2008, 2010, 2012, 2014), labels=c(2004, 2006, 2008, 2010, 2012, 2014)) + facet_wrap(~ Campus) + abluetheme + labs(title="Counts of each Profession Faceted by Campus") + ylab("Count") + xlab("Year")
+
+professionCountTable <- UCdataFrame %>% 
+  mutate(Title=searchPatternVect(Title)) %>%
+  group_by(Campus, Title) %>%
+  summarise(Total=n())
+
+```
+
